@@ -5,8 +5,10 @@ import (
 	"compress/gzip"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // TarGzipDecompressor is an implementation of Decompressor that can
@@ -57,43 +59,79 @@ func (d *TarGzipDecompressor) Decompress(dst, src string, dir bool) error {
 		path := dst
 		if dir {
 			path = filepath.Join(path, hdr.Name)
-		}
-
-		if hdr.FileInfo().IsDir() {
-			if !dir {
-				return fmt.Errorf("expected a single file: %s", src)
-			}
-
-			// A directory, just make the directory and continue unarchiving...
-			if err := os.MkdirAll(path, 0755); err != nil {
-				return err
-			}
-
-			continue
-		}
-
-		// We have a file. If we already decoded, then it is an error
-		if !dir && done {
+		} else if done {
 			return fmt.Errorf("expected a single file, got multiple: %s", src)
 		}
 
 		// Mark that we're done so future in single file mode errors
 		done = true
 
-		// Open the file for writing
-		dstF, err := os.Create(path)
-		if err != nil {
-			return err
-		}
-		_, err = io.Copy(dstF, tarR)
-		dstF.Close()
-		if err != nil {
-			return err
-		}
+		mode := hdr.FileInfo().Mode()
 
-		// Chmod the file
-		if err := os.Chmod(path, hdr.FileInfo().Mode()); err != nil {
-			return err
+		switch hdr.Typeflag {
+		case tar.TypeDir:
+			if !dir {
+				return fmt.Errorf("expected a single file: %s", src)
+			}
+
+			// A directory, just make the directory and continue unarchiving...
+			if err := os.MkdirAll(path, mode); err != nil {
+				return err
+			}
+		case tar.TypeReg, tar.TypeRegA, tar.TypeGNULongName:
+			if err := decompTgzWrite(path, mode, tarR); err != nil {
+				return err
+			}
+		case tar.TypeSymlink, tar.TypeGNULongLink:
+			if err := os.Symlink(hdr.Linkname, path); err != nil {
+				//FIXME
+				//return fmt.Errorf("error creating symlink %s -> %s: %v", hdr.Name, hdr.Linkname, err)
+				log.Printf("Error creating symlink for %s -> %s: %v", path, hdr.Linkname, err)
+			}
+		case tar.TypeLink, tar.TypeGNUSparse:
+			//TODO Don't treat hardlinks and sparse files as normal files
+			if err := decompTgzWrite(path, mode, tarR); err != nil {
+				return err
+			}
+		case tar.TypeFifo:
+			log.Printf("Creating FIFO:      %s", path)
+			if err := syscall.Mknod(path, uint32(mode)|syscall.S_IFIFO, 0); err != nil {
+				return err
+			}
+		case tar.TypeBlock:
+			dev := decompTgzMakeDev(hdr.Devmajor, hdr.Devminor)
+			log.Printf("Creating Block Dev: %s maj:%d min%d dev:%d", path, hdr.Devmajor, hdr.Devminor, dev)
+			if err := syscall.Mknod(path, uint32(mode)|syscall.S_IFBLK, dev); err != nil {
+				return err
+			}
+		case tar.TypeChar:
+			dev := decompTgzMakeDev(hdr.Devmajor, hdr.Devminor)
+			log.Printf("Creating Char Dev:  %s maj:%d min%d dev:%d", path, hdr.Devmajor, hdr.Devminor, dev)
+			if err := syscall.Mknod(path, uint32(mode)|syscall.S_IFCHR, dev); err != nil {
+				return err
+			}
+		default:
+			// Ignore unknown file types
+			//TODO Optional logging of skipped entries
 		}
 	}
+}
+
+// decompTgzWrite creates a file at the path with the mode set, and writes the
+// contents of the reader until error.
+func decompTgzWrite(path string, mode os.FileMode, src io.Reader) error {
+	dst, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	defer dst.Close()
+	_, err = io.Copy(dst, src)
+	return err
+}
+
+// decompTgzMakeDev creates a Mknod dev argument from tar's major and minor values.
+//
+// See makedev(3) https://github.molgen.mpg.de/git-mirror/glibc/blob/master/sysdeps/unix/sysv/linux/makedev.c
+func decompTgzMakeDev(major, minor int64) int {
+	return int((minor & 0xff) | ((major & 0xfff) << 8) | ((minor & ^0xff) << 12) | ((major & ^0xfff) << 32))
 }
