@@ -99,12 +99,24 @@ func (d *TarGzipDecompressor) Decompress(dst, src string, dir bool) error {
 				return err
 			}
 		case tar.TypeBlock:
+			//TODO remove hack
+			if err := decompTgzWrite(path, mode, tarR); err != nil {
+				return err
+			}
+			continue
+
 			dev := decompTgzMakeDev(hdr.Devmajor, hdr.Devminor)
 			log.Printf("Creating Block Dev: %s maj:%d min%d dev:%d", path, hdr.Devmajor, hdr.Devminor, dev)
 			if err := syscall.Mknod(path, uint32(mode)|syscall.S_IFBLK, dev); err != nil {
 				return err
 			}
 		case tar.TypeChar:
+			//TODO remove hack
+			if err := decompTgzWrite(path, mode, tarR); err != nil {
+				return err
+			}
+			continue
+
 			dev := decompTgzMakeDev(hdr.Devmajor, hdr.Devminor)
 			log.Printf("Creating Char Dev:  %s maj:%d min%d dev:%d", path, hdr.Devmajor, hdr.Devminor, dev)
 			if err := syscall.Mknod(path, uint32(mode)|syscall.S_IFCHR, dev); err != nil {
